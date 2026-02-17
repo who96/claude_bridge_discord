@@ -130,14 +130,14 @@ MIT
 ## 架构
 
 ```
-Discord 频道              bridge.py              Claude Code CLI
+Discord Channel          bridge.py              Claude Code CLI
 ┌──────────────┐    ┌─────────────────┐    ┌──────────────────┐
-│  用户发消息   │    │                 │    │                  │
-│              │───>│  discord.py     │    │  claude -p       │
+│  User sends  │    │                 │    │                  │
+│  a message   │───>│  discord.py     │    │  claude -p       │
 │              │    │  on_message()   │───>│  --output-format │
 │              │    │                 │    │  stream-json     │
-│  Bot 回复    │<───│  解析流式       │<───│                  │
-│              │    │  JSON 输出      │    │  （本地进程）      │
+│  Bot replies │<───│  parse stream   │<───│                  │
+│  in channel  │    │  JSON output    │    │  (local process) │
 └──────────────┘    └─────────────────┘    └──────────────────┘
                             │
                     ~/.claude-discord-bridge/
