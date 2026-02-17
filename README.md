@@ -129,20 +129,18 @@ MIT
 
 ## 架构
 
-```
-  Discord 频道          bridge.py         Claude Code CLI
-┌──────────────┐    ┌──────────────┐    ┌──────────────────┐
-│              │    │              │    │                  │
-│ 用户消息     │───>│ discord.py   │───>│ claude -p        │
-│              │    │ on_message() │    │ --stream-json    │
-│              │    │              │    │                  │
-│ Bot 回复     │<───│ 解析JSON流   │<───│ 本地进程         │
-│              │    │              │    │                  │
-└──────────────┘    └──────┬───────┘    └──────────────────┘
-                           │
-                   ~/.claude-discord-bridge/
-                     session.json (会话持久化)
-                     bridge.log  (运行日志)
+```mermaid
+graph LR
+    A["Discord 频道"] -->|用户消息| B["bridge.py"]
+    B -->|调用 CLI| C["Claude Code CLI"]
+    C -->|流式 JSON 响应| B
+    B -->|Bot 回复| A
+    B -.->|持久化| D["session.json"]
+
+    style A fill:#5865F2,color:#fff
+    style B fill:#2b2d31,color:#fff
+    style C fill:#d97706,color:#fff
+    style D fill:#374151,color:#aaa,stroke-dasharray: 5 5
 ```
 
 - **单进程** — 没有消息队列，没有数据库，没有额外服务
