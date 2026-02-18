@@ -26,6 +26,7 @@ CHANNEL_ID = int(_require_env("CHANNEL_ID"))
 WORKING_DIR = Path(os.environ.get("CLAUDE_CWD", str(Path.home())))
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 CLAUDE_SKIP_PERMS = os.environ.get("CLAUDE_SKIP_PERMISSIONS") == "1"
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "")
 CLAUDE_TIMEOUT = max(30, int(os.environ.get("CLAUDE_TIMEOUT", "300")))
 MAX_RESPONSE_SIZE = 50_000
 
@@ -133,6 +134,8 @@ async def call_claude(prompt: str) -> str:
     cmd = [CLAUDE_BIN]
     if CLAUDE_SKIP_PERMS:
         cmd.append("--dangerously-skip-permissions")
+    if CLAUDE_MODEL:
+        cmd.extend(["--model", CLAUDE_MODEL])
     cmd.extend(["-p", "--verbose", "--output-format", "stream-json"])
 
     if session_id:
@@ -152,6 +155,8 @@ async def call_claude(prompt: str) -> str:
         cmd = [CLAUDE_BIN]
         if CLAUDE_SKIP_PERMS:
             cmd.append("--dangerously-skip-permissions")
+        if CLAUDE_MODEL:
+            cmd.extend(["--model", CLAUDE_MODEL])
         cmd.extend(["-p", "--verbose", "--output-format", "stream-json",
                     "--session-id", session_id, "--", prompt])
         parts, retcode, stderr = await _run_claude(cmd)
