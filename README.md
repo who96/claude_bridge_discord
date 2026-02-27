@@ -22,6 +22,7 @@ Discord Channel          bridge.py              Claude Code CLI
                     ~/.claude-discord-bridge/
                         session.json
                         bridge.log
+                        handoffs/
 ```
 
 - **Single process** — no queue, no database, no extra services
@@ -60,6 +61,8 @@ DISCORD_TOKEN="your-bot-token" CHANNEL_ID="your-channel-id" .venv/bin/python3 br
 | `CLAUDE_CWD` | No | `$HOME` | Working directory for Claude Code CLI |
 | `CLAUDE_BIN` | No | `claude` | Path to Claude Code CLI binary |
 | `CLAUDE_TIMEOUT` | No | `300` | Max seconds per Claude call |
+| `CLAUDE_MODEL` | No | — | Override Claude model (e.g. `claude-sonnet-4-5-20250514`) |
+| `CLAUDE_SKIP_PERMISSIONS` | No | `0` | Set to `1` to pass `--dangerously-skip-permissions` |
 | `SELFTEST_ON_START` | No | `0` | Set to `1` to run a self-test on startup |
 
 ## Discord Bot Setup
@@ -77,6 +80,9 @@ DISCORD_TOKEN="your-bot-token" CHANNEL_ID="your-channel-id" .venv/bin/python3 br
 |---|---|
 | `/new` | Reset conversation session |
 | `/status` | Show current session ID, working directory, timeout |
+| `/connect [session-id]` | Connect to a specific session (no args = reset) |
+| `/handoff` | Handoff current session (summarize → cold-start a new session) |
+| `/help` | Show available commands |
 
 All other messages in the channel are forwarded to Claude Code CLI.
 
@@ -136,11 +142,13 @@ graph LR
     C -->|流式 JSON 响应| B
     B -->|Bot 回复| A
     B -.->|持久化| D["session.json"]
+    B -.->|交接存档| E["handoffs/"]
 
     style A fill:#5865F2,color:#fff
     style B fill:#2b2d31,color:#fff
     style C fill:#d97706,color:#fff
     style D fill:#374151,color:#aaa,stroke-dasharray: 5 5
+    style E fill:#374151,color:#aaa,stroke-dasharray: 5 5
 ```
 
 - **单进程** — 没有消息队列，没有数据库，没有额外服务
@@ -179,6 +187,8 @@ DISCORD_TOKEN="你的bot-token" CHANNEL_ID="你的频道ID" .venv/bin/python3 br
 | `CLAUDE_CWD` | 否 | `$HOME` | Claude Code CLI 的工作目录 |
 | `CLAUDE_BIN` | 否 | `claude` | Claude Code CLI 的路径 |
 | `CLAUDE_TIMEOUT` | 否 | `300` | 单次 Claude 调用的超时秒数 |
+| `CLAUDE_MODEL` | 否 | — | 指定 Claude 模型（如 `claude-sonnet-4-5-20250514`） |
+| `CLAUDE_SKIP_PERMISSIONS` | 否 | `0` | 设为 `1` 则传递 `--dangerously-skip-permissions` |
 | `SELFTEST_ON_START` | 否 | `0` | 设为 `1` 则启动时执行自检 |
 
 ## 创建 Discord Bot
@@ -196,6 +206,9 @@ DISCORD_TOKEN="你的bot-token" CHANNEL_ID="你的频道ID" .venv/bin/python3 br
 |---|---|
 | `/new` | 重置对话会话 |
 | `/status` | 查看当前会话 ID、工作目录、超时时间 |
+| `/connect [session-id]` | 连接指定会话（无参数则重置） |
+| `/handoff` | 交接当前会话（总结→冷启动新会话） |
+| `/help` | 显示可用命令 |
 
 频道内其他所有消息都会转发给 Claude Code CLI 处理。
 
