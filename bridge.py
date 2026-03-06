@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claude-discord-bridge — 单文件 Discord <-> Claude Code CLI 桥接。"""
+"""codex-discord-bridge — 单文件 Discord <-> Codex CLI 桥接。"""
 
 import asyncio
 import json
@@ -7,7 +7,6 @@ import os
 import re
 import signal
 import sys
-import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -25,15 +24,17 @@ def _require_env(key: str) -> str:
 
 DISCORD_TOKEN = _require_env("DISCORD_TOKEN")
 CHANNEL_ID = int(_require_env("CHANNEL_ID"))
-WORKING_DIR = Path(os.environ.get("CLAUDE_CWD", str(Path.home())))
-CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
-CLAUDE_SKIP_PERMS = os.environ.get("CLAUDE_SKIP_PERMISSIONS") == "1"
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "")
-CLAUDE_TIMEOUT = max(30, int(os.environ.get("CLAUDE_TIMEOUT", "300")))
+WORKING_DIR = Path(os.environ.get("CODEX_CWD", os.environ.get("CLAUDE_CWD", str(Path.home()))))
+CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
+CODEX_MODEL = os.environ.get("CODEX_MODEL", "").strip()
+CODEX_TIMEOUT = max(30, int(os.environ.get("CODEX_TIMEOUT", os.environ.get("CLAUDE_TIMEOUT", "300"))))
+CODEX_FULL_ACCESS = os.environ.get("CODEX_FULL_ACCESS") == "1"
 MAX_RESPONSE_SIZE = 50_000
 
 # --- Handoff constants ---
-HANDOFF_DIR = Path.home() / ".claude-discord-bridge" / "handoffs"
+STATE_DIR = Path.home() / ".codex-discord-bridge"
+SESSION_FILE = STATE_DIR / "session.json"
+HANDOFF_DIR = STATE_DIR / "handoffs"
 COLDSTART_BEGIN = "---COLDSTART-BEGIN---"
 COLDSTART_END = "---COLDSTART-END---"
 MAX_COLDSTART_LEN = 4000
@@ -82,11 +83,9 @@ def _is_valid_uuid(s: str) -> bool:
 
 
 # --- State ---
-STATE_DIR = Path.home() / ".claude-discord-bridge"
-SESSION_FILE = STATE_DIR / "session.json"
 MAX_MSG_LEN = 2000
 
-session_id: str | None = None
+thread_id: str | None = None
 call_lock = asyncio.Lock()
 _ready_once = False
 _inflight_proc: asyncio.subprocess.Process | None = None
@@ -97,17 +96,19 @@ _explicit_session: bool = False
 def load_session() -> str | None:
     if SESSION_FILE.exists():
         try:
-            return json.loads(SESSION_FILE.read_text()).get("session_id")
-        except (json.JSONDecodeError, KeyError):
+            data = json.loads(SESSION_FILE.read_text())
+            # Backward-compatible read for legacy field.
+            return data.get("thread_id") or data.get("session_id")
+        except (json.JSONDecodeError, KeyError, OSError, AttributeError):
             pass
     return None
 
 
-def save_session(sid: str | None):
+def save_session(tid: str | None):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     tmp = SESSION_FILE.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps({"session_id": sid}))
+        tmp.write_text(json.dumps({"thread_id": tid}))
         tmp.rename(SESSION_FILE)
     except OSError as e:
         print(f"[bridge] save_session failed: {e}", flush=True)
@@ -122,11 +123,46 @@ async def _kill_proc(proc: asyncio.subprocess.Process):
     await proc.wait()
 
 
-# --- Claude Code CLI ---
-async def _run_claude(cmd: list[str]) -> tuple[list[str], int, str]:
-    """Run claude CLI, return (text_parts, retcode, stderr)."""
+def _extract_agent_text(item: dict) -> str:
+    if item.get("type") != "agent_message":
+        return ""
+    text = item.get("text")
+    if isinstance(text, str) and text:
+        return text
+
+    content = item.get("content")
+    if not isinstance(content, list):
+        return ""
+
+    chunks: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in {"output_text", "text"} and isinstance(block.get("text"), str):
+            chunks.append(block["text"])
+    return "".join(chunks)
+
+
+def _build_codex_cmd(prompt: str, resume_tid: str | None = None) -> list[str]:
+    cmd = [CODEX_BIN, "exec"]
+    if resume_tid:
+        cmd.append("resume")
+    cmd.extend(["--json", "--skip-git-repo-check"])
+    if CODEX_FULL_ACCESS:
+        cmd.append("--dangerously-bypass-approvals-and-sandbox")
+    if CODEX_MODEL:
+        cmd.extend(["-m", CODEX_MODEL])
+    if resume_tid:
+        cmd.extend([resume_tid, prompt])
+    else:
+        cmd.append(prompt)
+    return cmd
+
+
+async def _run_codex(cmd: list[str]) -> tuple[list[str], int, str, str | None]:
+    """Run codex CLI and return (parts, retcode, stderr, started_thread_id)."""
     global _inflight_proc
-    print(f"[claude] cmd: {' '.join(cmd[:7])}...", flush=True)
+    print(f"[codex] cmd: {' '.join(cmd[:10])}...", flush=True)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -140,35 +176,56 @@ async def _run_claude(cmd: list[str]) -> tuple[list[str], int, str]:
 
     parts: list[str] = []
     total_size = 0
+    started_tid: str | None = None
+
     try:
         while True:
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout=CLAUDE_TIMEOUT)
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=CODEX_TIMEOUT)
             if not line:
                 break
+
             line_str = line.decode(errors="replace").strip()
             if not line_str:
                 continue
+
             try:
                 data = json.loads(line_str)
-                if data.get("type") == "assistant":
-                    for block in data.get("message", {}).get("content", []):
-                        if block.get("type") == "text":
-                            parts.append(block["text"])
-                            total_size += len(block["text"])
-                elif data.get("type") == "result":
-                    result_text = data.get("result", "")
-                    if result_text and not parts:
-                        parts.append(result_text)
-                        total_size += len(result_text)
-            except (json.JSONDecodeError, KeyError):
-                print(f"[claude] non-json stdout: {line_str[:200]}", flush=True)
-            if total_size > MAX_RESPONSE_SIZE:
-                parts.append("\n...(响应过长，已截断)")
-                break
+            except json.JSONDecodeError:
+                # Ignore non-JSON noise lines.
+                print(f"[codex] non-json stdout: {line_str[:200]}", flush=True)
+                continue
+
+            event_type = data.get("type")
+            if event_type == "thread.started":
+                tid = data.get("thread_id")
+                if isinstance(tid, str) and tid:
+                    started_tid = tid
+                continue
+
+            if event_type == "item.completed":
+                item = data.get("item")
+                if isinstance(item, dict):
+                    msg_text = _extract_agent_text(item)
+                    if msg_text:
+                        parts.append(msg_text)
+                        total_size += len(msg_text)
+                if total_size > MAX_RESPONSE_SIZE:
+                    parts.append("\n...(响应过长，已截断)")
+                    break
+                continue
+
+            if event_type == "agent_message":
+                msg_text = _extract_agent_text(data)
+                if msg_text:
+                    parts.append(msg_text)
+                    total_size += len(msg_text)
+                if total_size > MAX_RESPONSE_SIZE:
+                    parts.append("\n...(响应过长，已截断)")
+                    break
     except asyncio.TimeoutError:
-        print("[claude] readline timeout, killing proc", flush=True)
+        print("[codex] readline timeout, killing proc", flush=True)
         await _kill_proc(proc)
-        return parts or ["(子进程读取超时)"], 1, "timeout"
+        return parts or ["(子进程读取超时)"], 1, "timeout", started_tid
     except asyncio.CancelledError:
         await _kill_proc(proc)
         raise
@@ -177,60 +234,75 @@ async def _run_claude(cmd: list[str]) -> tuple[list[str], int, str]:
 
     stderr_data = await proc.stderr.read() if proc.stderr else b""
     retcode = await proc.wait()
-    return parts, retcode, stderr_data.decode(errors="replace")[:500]
+    return parts, retcode, stderr_data.decode(errors="replace")[:800], started_tid
 
 
-async def call_claude(prompt: str) -> str:
-    global session_id, _explicit_session
+async def _run_codex_once(prompt: str, resume_tid: str | None = None) -> tuple[str, int, str, str | None]:
+    cmd = _build_codex_cmd(prompt, resume_tid=resume_tid)
+    parts, retcode, stderr, started_tid = await _run_codex(cmd)
+    return "\n".join(parts), retcode, stderr, started_tid
 
-    cmd = [CLAUDE_BIN]
-    if CLAUDE_SKIP_PERMS:
-        cmd.append("--dangerously-skip-permissions")
-    if CLAUDE_MODEL:
-        cmd.extend(["--model", CLAUDE_MODEL])
-    cmd.extend(["-p", "--verbose", "--output-format", "stream-json"])
 
-    if session_id:
-        cmd.extend(["-r", session_id])
-    else:
-        session_id = str(uuid.uuid4())
-        cmd.extend(["--session-id", session_id])
+def _diag_text(retcode: int, stderr: str) -> str:
+    return f"(无响应 | exit={retcode} | stderr={stderr[:300]})"
 
-    cmd.extend(["--", prompt])
 
-    parts, retcode, stderr = await _run_claude(cmd)
+async def call_codex(prompt: str) -> str:
+    global thread_id, _explicit_session
 
-    # If resume failed (exit=1), fallback behaviour depends on _explicit_session
-    if retcode != 0 and session_id:
-        if _explicit_session:
-            # User explicitly connected to this session — do NOT silently fall back
-            diag = (
-                f"会话 `{session_id}` resume 失败（exit={retcode}）。\n"
-                "该会话可能已过期或不存在。\n"
-                "使用 `/new` 开启新会话，或 `/connect <uuid>` 连接其他会话。"
-            )
-            print(f"[claude] explicit session resume failed, not falling back", flush=True)
-            return diag
+    requested_tid = thread_id
+    if requested_tid:
+        text, retcode, stderr, started_tid = await _run_codex_once(prompt, resume_tid=requested_tid)
+        tid_mismatch = bool(started_tid and started_tid != requested_tid)
+        resume_failed = retcode != 0 or started_tid is None or tid_mismatch
 
-        print(f"[claude] resume failed (exit={retcode}), retrying with new session", flush=True)
-        session_id = str(uuid.uuid4())
-        cmd = [CLAUDE_BIN]
-        if CLAUDE_SKIP_PERMS:
-            cmd.append("--dangerously-skip-permissions")
-        if CLAUDE_MODEL:
-            cmd.extend(["--model", CLAUDE_MODEL])
-        cmd.extend(["-p", "--verbose", "--output-format", "stream-json",
-                    "--session-id", session_id, "--", prompt])
-        parts, retcode, stderr = await _run_claude(cmd)
+        if _explicit_session and resume_failed:
+            details = [f"会话 `{requested_tid}` resume 失败。"]
+            if retcode != 0:
+                details.append(f"退出码：`{retcode}`")
+            if started_tid is None:
+                details.append("Codex 未返回 `thread.started.thread_id`。")
+            elif tid_mismatch:
+                details.append(
+                    f"Codex 返回了不同 thread：`{started_tid}`（预期 `{requested_tid}`）。"
+                )
+            if stderr:
+                details.append(f"stderr: `{stderr[:300]}`")
+            details.append("已阻止自动切换。请使用 `/new` 或 `/connect <uuid>`。")
+            # Keep explicit thread binding unchanged.
+            thread_id = requested_tid
+            save_session(thread_id)
+            print("[codex] explicit thread resume failed; auto-fallback blocked", flush=True)
+            return "\n".join(details)
 
-    save_session(session_id)
+        if not _explicit_session and resume_failed:
+            # Codex may already have auto-started a new thread on resume.
+            if retcode == 0 and started_tid:
+                thread_id = started_tid
+                _explicit_session = False
+                save_session(thread_id)
+                print(
+                    f"[codex] implicit resume switched thread {requested_tid} -> {started_tid}",
+                    flush=True,
+                )
+                return text or _diag_text(retcode, stderr)
 
-    if not parts:
-        diag = f"(无响应 | exit={retcode} | stderr={stderr})"
-        print(f"[claude] {diag}", flush=True)
-        return diag
+            print(f"[codex] resume failed (exit={retcode}), creating new thread", flush=True)
+            text, retcode, stderr, started_tid = await _run_codex_once(prompt, resume_tid=None)
+            thread_id = started_tid
+            _explicit_session = False
+            save_session(thread_id)
+            return text or _diag_text(retcode, stderr)
 
-    return "\n".join(parts)
+        thread_id = started_tid
+        save_session(thread_id)
+        return text or _diag_text(retcode, stderr)
+
+    text, retcode, stderr, started_tid = await _run_codex_once(prompt, resume_tid=None)
+    thread_id = started_tid
+    _explicit_session = False
+    save_session(thread_id)
+    return text or _diag_text(retcode, stderr)
 
 
 # --- Handoff helpers ---
@@ -245,11 +317,11 @@ def _parse_coldstart(text: str) -> tuple[str | None, str]:
     return cs, text
 
 
-def _save_handoff(old_sid: str, full_text: str, coldstart: str | None):
+def _save_handoff(old_tid: str, full_text: str, coldstart: str | None):
     try:
         HANDOFF_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        (HANDOFF_DIR / f"{ts}_{old_sid}.md").write_text(full_text, encoding="utf-8")
+        (HANDOFF_DIR / f"{ts}_{old_tid}.md").write_text(full_text, encoding="utf-8")
         if coldstart:
             (HANDOFF_DIR / "latest_coldstart.md").write_text(coldstart, encoding="utf-8")
     except OSError as e:
@@ -284,13 +356,13 @@ client = discord.Client(intents=intents)
 
 @client.event
 async def on_ready():
-    global session_id, _ready_once
+    global thread_id, _ready_once
     if _ready_once:
         print(f"[bridge] reconnected as {client.user}", flush=True)
         return
     _ready_once = True
-    session_id = load_session()
-    print(f"[bridge] online as {client.user} | session={session_id} | channel={CHANNEL_ID}", flush=True)
+    thread_id = load_session()
+    print(f"[bridge] online as {client.user} | thread={thread_id} | channel={CHANNEL_ID}", flush=True)
 
     channel = client.get_channel(CHANNEL_ID)
     if channel is None:
@@ -299,7 +371,7 @@ async def on_ready():
     if os.environ.get("SELFTEST_ON_START") == "1":
         async with call_lock:
             try:
-                response = await asyncio.wait_for(call_claude("请只回复两个字：在线"), timeout=60)
+                response = await asyncio.wait_for(call_codex("请只回复两个字：在线"), timeout=60)
                 await channel.send(f"[自检通过] {response}")
             except Exception as e:
                 await channel.send(f"[自检失败] {e}")
@@ -322,7 +394,7 @@ async def on_error(event, *args, **kwargs):
 
 @client.event
 async def on_message(msg: discord.Message):
-    global session_id, _explicit_session
+    global thread_id, _explicit_session
 
     if msg.author.bot or msg.channel.id != CHANNEL_ID:
         return
@@ -335,7 +407,7 @@ async def on_message(msg: discord.Message):
 
     # --- Commands ---
     if text.lower() == "/new":
-        session_id = None
+        thread_id = None
         _explicit_session = False
         save_session(None)
         await msg.channel.send("会话已重置。")
@@ -343,9 +415,10 @@ async def on_message(msg: discord.Message):
 
     if text.lower() == "/status":
         await msg.channel.send(
-            f"Session: `{session_id or 'None'}`\n"
+            f"Thread: `{thread_id or 'None'}`\n"
             f"Working dir: `{WORKING_DIR}`\n"
-            f"Timeout: `{CLAUDE_TIMEOUT}s`"
+            f"Timeout: `{CODEX_TIMEOUT}s`\n"
+            "Backend: `codex`"
         )
         return
 
@@ -354,10 +427,10 @@ async def on_message(msg: discord.Message):
             "**可用命令**\n"
             "`/new` — 重置会话\n"
             "`/status` — 查看状态\n"
-            "`/connect [session-id]` — 连接指定会话（无参数则重置）\n"
+            "`/connect [thread-id]` — 连接指定会话（无参数则重置）\n"
             "`/handoff` — 交接当前会话（总结→冷启动新会话）\n"
             "`/help` — 显示帮助\n"
-            "其他消息 — 转发给 Claude"
+            "其他消息 — 转发给 Codex"
         )
         return
 
@@ -365,7 +438,7 @@ async def on_message(msg: discord.Message):
         parts = text.split(None, 1)
         if len(parts) == 1:
             # /connect with no argument — reset session
-            session_id = None
+            thread_id = None
             _explicit_session = False
             save_session(None)
             await msg.channel.send("会话已重置。")
@@ -373,18 +446,18 @@ async def on_message(msg: discord.Message):
             candidate = parts[1].strip()
             if not _is_valid_uuid(candidate):
                 await msg.channel.send(
-                    f"无效的 session ID 格式：`{candidate}`\n"
+                    f"无效的 thread ID 格式：`{candidate}`\n"
                     "请提供标准 UUID（例如：`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）。"
                 )
             else:
-                session_id = candidate
+                thread_id = candidate
                 _explicit_session = True
-                save_session(session_id)
-                await msg.channel.send(f"已连接到会话 `{session_id}`。")
+                save_session(thread_id)
+                await msg.channel.send(f"已连接到 thread `{thread_id}`。")
         return
 
     if text.lower() == "/handoff":
-        if not session_id:
+        if not thread_id:
             await msg.channel.send("当前无活跃会话，无法执行交接。")
             return
 
@@ -396,15 +469,15 @@ async def on_message(msg: discord.Message):
         async with call_lock:
             try:
                 async with msg.channel.typing():
-                    old_sid = session_id
+                    old_tid = thread_id
                     try:
                         handoff_response = await asyncio.wait_for(
-                            call_claude(HANDOFF_PROMPT),
-                            timeout=CLAUDE_TIMEOUT,
+                            call_codex(HANDOFF_PROMPT),
+                            timeout=CODEX_TIMEOUT,
                         )
                     except asyncio.TimeoutError:
                         await msg.channel.send(
-                            f"交接超时（{CLAUDE_TIMEOUT}s）。会话未被清除，可继续使用或稍后重试。"
+                            f"交接超时（{CODEX_TIMEOUT}s）。会话未被清除，可继续使用或稍后重试。"
                         )
                         return
                     except Exception as e:
@@ -417,38 +490,38 @@ async def on_message(msg: discord.Message):
                     if coldstart is None:
                         await msg.channel.send(
                             "交接文档中未找到冷启动标记，会话未被清除。\n"
-                            "以下是 Claude 的响应（供参考）：\n"
+                            "以下是 Codex 的响应（供参考）：\n"
                             + handoff_response[:1500]
                         )
                         return
 
-                    _save_handoff(old_sid, full_text, coldstart)
+                    _save_handoff(old_tid, full_text, coldstart)
 
-                    # Clear session so call_claude will create a new one
-                    session_id = None
+                    # Clear thread so call_codex will create a new one.
+                    thread_id = None
                     _explicit_session = False
+                    save_session(None)
 
                     try:
-                        await asyncio.wait_for(
-                            call_claude(coldstart),
-                            timeout=CLAUDE_TIMEOUT,
-                        )
-                        new_sid = session_id
-                        save_session(new_sid)
+                        await asyncio.wait_for(call_codex(coldstart), timeout=CODEX_TIMEOUT)
+                        new_tid = thread_id
+                        if not new_tid:
+                            raise RuntimeError("Codex 未返回新 thread_id")
+                        save_session(new_tid)
                         await msg.channel.send(
                             "会话交接完成。\n"
-                            f"旧会话：`{old_sid}`\n"
-                            f"新会话：`{new_sid}`\n"
+                            f"旧会话：`{old_tid}`\n"
+                            f"新会话：`{new_tid}`\n"
                             "冷启动已注入，可继续工作。"
                         )
                     except Exception as e:
-                        # New session failed — restore old sid so user can recover
-                        session_id = old_sid
+                        # New session failed — restore old thread so user can recover.
+                        thread_id = old_tid
                         _explicit_session = True
-                        save_session(old_sid)
+                        save_session(old_tid)
                         await msg.channel.send(
                             f"新会话启动失败：{str(e)[:800]}\n"
-                            f"已恢复旧会话 `{old_sid}`，可用 `/connect {old_sid}` 手动重连。"
+                            f"已恢复旧会话 `{old_tid}`，可用 `/connect {old_tid}` 手动重连。"
                         )
             finally:
                 if hourglass_added:
@@ -458,7 +531,7 @@ async def on_message(msg: discord.Message):
                         pass
         return
 
-    # --- Forward to Claude ---
+    # --- Forward to Codex ---
     hourglass_added = False
     if call_lock.locked():
         await msg.add_reaction("\u23f3")
@@ -468,15 +541,12 @@ async def on_message(msg: discord.Message):
         try:
             async with msg.channel.typing():
                 try:
-                    response = await asyncio.wait_for(
-                        call_claude(text),
-                        timeout=CLAUDE_TIMEOUT,
-                    )
+                    response = await asyncio.wait_for(call_codex(text), timeout=CODEX_TIMEOUT)
                     await send_long(msg.channel, response)
                 except asyncio.TimeoutError:
-                    await msg.channel.send(f"超时（{CLAUDE_TIMEOUT}s）。可用 /new 重置会话后重试。")
+                    await msg.channel.send(f"超时（{CODEX_TIMEOUT}s）。可用 /new 重置会话后重试。")
                 except FileNotFoundError:
-                    await msg.channel.send(f"`{CLAUDE_BIN}` 不在 PATH 中。请检查环境配置。")
+                    await msg.channel.send(f"`{CODEX_BIN}` 不在 PATH 中。请检查环境配置。")
                 except Exception as e:
                     await msg.channel.send(f"错误：{str(e)[:1500]}")
         finally:
