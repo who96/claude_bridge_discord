@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.codex.discord-bridge</string>
+    <string>com.cli.discord-bridge</string>
     <key>ProgramArguments</key>
     <array>
         <string>/path/to/cli-discord-bridge/.venv/bin/python3</string>
@@ -31,8 +31,8 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/you/.codex-discord-bridge/bridge.log</string>
+    <string>/Users/you/.cli-discord-bridge/bridge.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/you/.codex-discord-bridge/bridge.err.log</string>
+    <string>/Users/you/.cli-discord-bridge/bridge.err.log</string>
 </dict>
 </plist>

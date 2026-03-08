@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""codex-discord-bridge — 单文件 Discord <-> Codex CLI 桥接。"""
+"""cli-discord-bridge — 单文件 Discord <-> Codex CLI 桥接。"""
 
 import asyncio
 import json
@@ -32,7 +32,7 @@ CODEX_FULL_ACCESS = os.environ.get("CODEX_FULL_ACCESS") == "1"
 MAX_RESPONSE_SIZE = 50_000
 
 # --- Handoff constants ---
-STATE_DIR = Path.home() / ".codex-discord-bridge"
+STATE_DIR = Path.home() / ".cli-discord-bridge"
 SESSION_FILE = STATE_DIR / "session.json"
 HANDOFF_DIR = STATE_DIR / "handoffs"
 COLDSTART_BEGIN = "---COLDSTART-BEGIN---"

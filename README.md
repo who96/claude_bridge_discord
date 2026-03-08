@@ -21,11 +21,11 @@ Discord message -> bridge.py -> codex exec/resume --json -> parse JSON events ->
 
 Bridge state:
 
-- State dir: `~/.codex-discord-bridge/`
-- Session file: `~/.codex-discord-bridge/session.json`
+- State dir: `~/.cli-discord-bridge/`
+- Session file: `~/.cli-discord-bridge/session.json`
   - Primary key: `thread_id`
   - Backward-compatible read: legacy `session_id`
-- Handoff dir: `~/.codex-discord-bridge/handoffs/`
+- Handoff dir: `~/.cli-discord-bridge/handoffs/`
 
 ## Codex Session Protocol
 
@@ -87,46 +87,46 @@ CODEX_FULL_ACCESS="1" \
 .venv/bin/python3 bridge.py
 ```
 
-## LaunchAgent (Codex)
+## LaunchAgent (CLI)
 
 Keep old example for rollback:
 
 - `com.claude.discord-bridge.plist.example` (legacy)
 
-Use new Codex example for migration:
+Use the active CLI bridge example:
 
-- `com.codex.discord-bridge.plist.example`
+- `com.cli.discord-bridge.plist.example`
 
 Install example:
 
 ```bash
-cp com.codex.discord-bridge.plist.example ~/Library/LaunchAgents/com.codex.discord-bridge.plist
+cp com.cli.discord-bridge.plist.example ~/Library/LaunchAgents/com.cli.discord-bridge.plist
 # edit token/channel/paths
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codex.discord-bridge.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cli.discord-bridge.plist
 ```
 
 Stop:
 
 ```bash
-launchctl bootout gui/$(id -u)/com.codex.discord-bridge
+launchctl bootout gui/$(id -u)/com.cli.discord-bridge
 ```
 
 Logs:
 
 ```bash
-tail -f ~/.codex-discord-bridge/bridge.log
-tail -f ~/.codex-discord-bridge/bridge.err.log
+tail -f ~/.cli-discord-bridge/bridge.log
+tail -f ~/.cli-discord-bridge/bridge.err.log
 ```
 
 ## Gray Release and Rollback
 
 Recommended migration sequence:
 
-1. Start `com.codex.discord-bridge` in a new Discord channel.
+1. Start `com.cli.discord-bridge` in a new Discord channel.
 2. Keep old `com.claude.discord-bridge` running in parallel for observation.
 3. Observe 24h for stuck process, leaks, thread loss, and command compatibility.
-4. Switch OpenClaw DR entry to the Codex channel.
-5. If needed, rollback by stopping `com.codex.discord-bridge` and continuing with legacy service.
+4. Switch OpenClaw DR entry to the new CLI bridge channel.
+5. If needed, rollback by stopping `com.cli.discord-bridge` and continuing with legacy service.
 
 ## Notes
 
