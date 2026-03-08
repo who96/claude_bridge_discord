@@ -1,6 +1,8 @@
-# Codex Discord Bridge
+# CLI Discord Bridge
 
-Single-file bridge that connects one Discord channel to one Codex CLI process.
+Single-file Discord bridge for Codex-first operation with legacy Claude compatibility.
+
+This repository keeps the original Claude bridge lineage, but the actively maintained runtime targets Codex: one Discord channel connects to one Codex CLI process. Legacy Claude artifacts remain only for migration and rollback.
 
 This repository keeps command compatibility with the previous Claude bridge:
 `/new /status /connect /handoff /help`.
