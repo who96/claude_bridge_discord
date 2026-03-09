@@ -1,10 +1,10 @@
 # CLI Discord Bridge
 
-Single-file Discord bridge for Codex-first operation with legacy Claude compatibility.
+Single-file Discord bridge for Codex CLI operation.
 
-This repository keeps the original Claude bridge lineage, but the actively maintained runtime targets Codex: one Discord channel connects to one Codex CLI process. Legacy Claude artifacts remain only for migration and rollback.
+The actively maintained runtime targets Codex: one Discord channel connects to one Codex CLI process. Legacy artifacts remain only for rollback and command continuity.
 
-This repository keeps command compatibility with the previous Claude bridge:
+Command surface remains compatible with earlier bridge flows:
 `/new /status /connect /handoff /help`.
 
 ## Deployment Topology
@@ -89,7 +89,7 @@ CODEX_FULL_ACCESS="1" \
 
 ## LaunchAgent (CLI)
 
-Keep old example for rollback:
+Legacy rollback example:
 
 - `com.claude.discord-bridge.plist.example` (legacy)
 
@@ -123,7 +123,7 @@ tail -f ~/.cli-discord-bridge/bridge.err.log
 Recommended migration sequence:
 
 1. Start `com.cli.discord-bridge` in a new Discord channel.
-2. Keep old `com.claude.discord-bridge` running in parallel for observation.
+2. Keep the legacy rollback service running in parallel for observation.
 3. Observe 24h for stuck process, leaks, thread loss, and command compatibility.
 4. Switch OpenClaw DR entry to the new CLI bridge channel.
 5. If needed, rollback by stopping `com.cli.discord-bridge` and continuing with legacy service.
